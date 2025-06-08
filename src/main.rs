@@ -12,7 +12,7 @@ use tokenizers::{PaddingParams, Tokenizer, TruncationParams};
 const LR: f64 = 2e-5;
 const EPOCHS: usize = 3;
 
-const SEQ: usize = 70;
+const SEQ: usize = 20;
 
 fn main() -> Result<(), Error> {
     let device = Device::new_metal(0)?;
