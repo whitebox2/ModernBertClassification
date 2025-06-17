@@ -1,15 +1,12 @@
 use anyhow::Error;
 use candle_core::{D, DType, Device, Tensor};
-use candle_nn::{
-    VarBuilder,
-    loss::{cross_entropy, nll},
-    ops,
-    optim::Optimizer,
-    var_map::VarMap,
-};
+use candle_nn::{VarBuilder, loss, ops, optim::Optimizer, var_map::VarMap};
 use candle_optimisers::adam::{Adam, ParamsAdam};
 use candle_transformers::models::modernbert::*;
 use hf_hub::{Repo, RepoType, api::sync::Api};
+use tokenizers::Encoding;
+
+// use polars::prelude::*;
 
 use tokenizers::{PaddingParams, Tokenizer, TruncationParams};
 const LR: f64 = 2e-5;
@@ -20,7 +17,7 @@ const SEQ: usize = 70;
 fn main() -> Result<(), Error> {
     let device = Device::new_metal(0)?;
     let repo = Api::new()?.repo(Repo::with_revision(
-        "sbintuitions/modernbert-ja-30m".to_string(),
+        "answerdotai/ModernBERT-base".to_string(),
         RepoType::Model,
         "main".into(),
     ));
@@ -62,25 +59,22 @@ fn main() -> Result<(), Error> {
 
     let model = ModernBertForSequenceClassification::load(vb.clone(), &config)?;
 
-    // データセット作成
-    let samples = get_train_data_batch(&tokenizer, &device, 2usize)?;
-    println!("{:?}", samples);
-    train_model_batch(model, varmap, samples)?;
+    let samples = get_train_data(&tokenizer, &device)?;
+
+    train_model(model, varmap, samples)?;
     Ok(())
 }
 
-// トレーニングループ
-fn train_model_batch(
+fn train_model(
     model: ModernBertForSequenceClassification,
     varmap: VarMap,
-    batches: Vec<(Tensor, Tensor, Tensor)>,
+    samples: Vec<(Tensor, Tensor, Tensor)>,
 ) -> Result<(), Error> {
     for epoch in 0..EPOCHS {
         println!("Epoch {}/{}", epoch + 1, EPOCHS);
         let mut total_loss = 0.0;
-        let mut total_samples = 0;
 
-        for (i, (input_ids, attention_mask, labels)) in batches.iter().enumerate() {
+        for (i, (input_id, attention_mask, label)) in samples.iter().enumerate() {
             let mut opt = Adam::new(
                 varmap.all_vars(),
                 ParamsAdam {
@@ -89,85 +83,64 @@ fn train_model_batch(
                 },
             )?;
 
-            let batch_size = input_ids.dim(0)?;
-
-            // 順伝播
-            let logits = model.forward(input_ids, attention_mask)?; // [batch_size, num_classes]
-
-            println!("{:?}", logits);
+            let logits = model.forward(input_id, attention_mask)?;
             let log_sm = ops::log_softmax(&logits, D::Minus1)?;
-            let loss_value = cross_entropy(&log_sm, labels)?;
 
-            // 損失計算（バッチ全体の平均）
-            // let loss_value = nll(&loss, labels)?;
+            let loss_value = loss::nll(&log_sm, label)?;
 
-            // 逆伝播
             opt.backward_step(&loss_value)?;
 
             let loss_scalar = loss_value.to_vec0::<f32>()?;
-            total_loss += loss_scalar * batch_size as f32;
-            total_samples += batch_size;
+            total_loss += loss_scalar;
 
-            println!(
-                "  Batch {}/{}, Loss: {:.4}, Batch Size: {}",
-                i + 1,
-                batches.len(),
-                loss_scalar,
-                batch_size
-            );
+            if (i + 1) % 10 == 0 || i == samples.len() - 1 {
+                println!(
+                    "  Sample {}/{}, Loss: {:.4}",
+                    i + 1,
+                    samples.len(),
+                    loss_scalar
+                );
+            }
         }
 
-        println!("  Average Loss: {:.4}", total_loss / total_samples as f32);
+        println!("  Average Loss: {:.4}", total_loss / samples.len() as f32);
         println!();
     }
 
     Ok(())
 }
 
-fn get_train_data_batch(
+fn get_train_data(
     tokenizer: &Tokenizer,
     device: &Device,
-    batch_size: usize,
 ) -> Result<Vec<(Tensor, Tensor, Tensor)>, Error> {
     let sentences: Vec<&str> = vec![
-        "ヤリスクロスは大ヒット車種です。",
-        "2000GTがGTレースに出場しました。",
-        "シビックの発売４０周年記念品が発売されました。",
+        "The new smartphone features a foldable display and 5G support.",
+        "The government announced new economic policies today.",
+        "Regular exercise and a balanced diet are key to staying healthy.",
+        "The latest action movie broke box office records this weekend.",
     ];
-    let labels: Vec<u32> = vec![0, 1, 0];
 
-    let mut batches = Vec::new();
+    let labels: Vec<u32> = vec![1, 2, 3, 4];
 
-    // データをバッチサイズごとに分割
-    for chunk in sentences.chunks(batch_size) {
-        let chunk_labels: Vec<u32> = labels
-            .iter()
-            .skip(batches.len() * batch_size)
-            .take(chunk.len())
-            .cloned()
-            .collect();
+    let mut features: Vec<(Tensor, Tensor, Tensor)> = Vec::with_capacity(sentences.len());
 
-        // バッチ内の全文章をエンコード
-        let encodings: Vec<_> = chunk
-            .iter()
-            .map(|text| tokenizer.encode(*text, true).expect("valid text"))
-            .collect();
+    for (idx, text) in sentences.iter().enumerate() {
+        let encoding: Encoding = tokenizer.encode(*text, true).expect("valid text");
 
-        // バッチテンソル作成
-        let batch_input_ids: Vec<Vec<u32>> =
-            encodings.iter().map(|enc| enc.get_ids().to_vec()).collect();
+        // input_ids（u32）→ Vec<u32> → Tensor
+        let input_ids = encoding.get_ids();
+        let tensor_input_ids = Tensor::new(input_ids, device)?;
 
-        let batch_attention_mask: Vec<Vec<u32>> = encodings
-            .iter()
-            .map(|enc| enc.get_attention_mask().to_vec())
-            .collect();
+        // attention_mask（u32）→ Vec<u32> → Tensor
+        let mask = encoding.get_attention_mask();
+        let tensor_mask = Tensor::new(mask, device)?;
 
-        let tensor_input_ids = Tensor::new(batch_input_ids, device)?; // [batch_size, seq_len]
-        let tensor_mask = Tensor::new(batch_attention_mask, device)?; // [batch_size, seq_len]
-        let tensor_labels = Tensor::new(chunk_labels, device)?; // [batch_size]
+        let label_value = labels[idx];
+        let tensor_label = Tensor::new(label_value, device)?;
 
-        batches.push((tensor_input_ids, tensor_mask, tensor_labels));
+        features.push((tensor_input_ids, tensor_mask, tensor_label));
     }
 
-    Ok(batches)
+    Ok(features)
 }
