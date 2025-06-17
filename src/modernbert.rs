@@ -243,8 +243,8 @@ pub struct ModernBertHead {
 
 impl ModernBertHead {
     fn load(vb: VarBuilder, config: &Config) -> Result<Self> {
-        let dense = linear(config.hidden_size, config.hidden_size, vb.pp("dense"))?;
-        let norm = candle_nn::layer_norm(config.hidden_size, config.layer_norm_eps, vb.pp("norm"))?;
+        let dense = linear_no_bias(config.hidden_size, config.hidden_size, vb.pp("dense"))?;
+        let norm = layer_norm_no_bias(config.hidden_size, config.layer_norm_eps, vb.pp("norm"))?;
         Ok(Self { dense, norm })
     }
 }
@@ -504,4 +504,3 @@ impl ModernBertForSequenceClassification {
         Ok(xs)
     }
 }
-
