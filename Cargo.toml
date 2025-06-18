@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-polars = { version = "0.48.1", features = ["lazy", "strings"] }
+polars = { version = "0.49.0", features = ["csv", "lazy", "strings"] }
 anyhow = "1.0.75"
 hf-hub = "0.4.2"
 tokenizers = "0.21.1"
