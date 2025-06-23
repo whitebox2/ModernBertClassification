@@ -1,0 +1,103 @@
+use candle_core::{DType, Result, Tensor};
+
+fn convert_pytorch_logic(attention_mask: &Tensor) -> Result<(Tensor, i64, Tensor)> {
+    // Step 1: attention_mask.sum(dim=-1, dtype=torch.int32)
+    // candleでは最後の次元(-1)でsumを取る
+    let seqlens_in_batch = attention_mask
+        .sum_keepdim(attention_mask.dims().len() - 1)? // 最後の次元でsum
+        .squeeze(attention_mask.dims().len() - 1)?; // 次元を削除、型変換は後で行う
+
+    // Step 2: int(seqlens_in_batch.max().item())
+    // candleでmaxを取得してスカラー値を取得
+    let max_seqlen_in_batch = seqlens_in_batch
+        .max(0)? // 0次元でmax（全体のmax）
+        .to_scalar::<f32>()? as i64; // f32として取得してi64にキャスト
+
+    // Step 3: torch.cumsum(seqlens_in_batch, dim=0, dtype=torch.int32)
+    let cumsum_result = seqlens_in_batch.cumsum(0)?; // 0次元でcumsum（f32のまま）
+
+    // Step 4: torch.nn.functional.pad(..., (1, 0))
+    // (1, 0)は左に1要素、右に0要素パディング
+    let cu_seqlens = cumsum_result.pad_with_zeros(0, 1, 0)?;
+
+    Ok((seqlens_in_batch, max_seqlen_in_batch, cu_seqlens))
+}
+
+fn main() -> Result<()> {
+    println!("PyTorch to Candle Implementation Demo");
+    println!("=====================================");
+
+    // 例1: 基本的なケース（バッチサイズ2、シーケンス長4）
+    println!("\n例1: 基本的なケース");
+    let attention_mask1 = Tensor::from_slice(
+        &[1.0f32, 1.0, 1.0, 0.0, 1.0, 1.0, 0.0, 0.0], // フラット配列
+        (2, 4),
+        &candle_core::Device::Cpu,
+    )?;
+
+    println!("attention_mask1:");
+    println!("{:?}", attention_mask1);
+
+    let (seqlens1, max_seqlen1, cu_seqlens1) = convert_pytorch_logic(&attention_mask1)?;
+
+    println!("seqlens_in_batch: {:?}", seqlens1.to_vec1::<f32>()?);
+    println!("max_seqlen_in_batch: {}", max_seqlen1);
+    println!("cu_seqlens: {:?}", cu_seqlens1.to_vec1::<f32>()?);
+
+    // 例2: より大きなバッチ（バッチサイズ3、シーケンス長5）
+    println!("\n例2: より大きなバッチ");
+    let attention_mask2 = Tensor::from_slice(
+        &[
+            1.0f32, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0,
+        ], // フラット配列
+        (3, 5),
+        &candle_core::Device::Cpu,
+    )?;
+
+    println!("attention_mask2:");
+    println!("{:?}", attention_mask2);
+
+    let (seqlens2, max_seqlen2, cu_seqlens2) = convert_pytorch_logic_optimized(&attention_mask2)?;
+
+    println!("seqlens_in_batch: {:?}", seqlens2.to_vec1::<f32>()?);
+    println!("max_seqlen_in_batch: {}", max_seqlen2);
+    println!("cu_seqlens: {:?}", cu_seqlens2.to_vec1::<f32>()?);
+
+    // 例3: 単一バッチのケース
+    println!("\n例3: 単一バッチ");
+    let attention_mask3 = Tensor::from_slice(
+        &[1.0f32, 1.0, 1.0, 1.0, 0.0, 0.0], // フラット配列
+        (1, 6),
+        &candle_core::Device::Cpu,
+    )?;
+
+    println!("attention_mask3:");
+    println!("{:?}", attention_mask3);
+
+    let (seqlens3, max_seqlen3, cu_seqlens3) = convert_pytorch_logic(&attention_mask3)?;
+
+    println!("seqlens_in_batch: {:?}", seqlens3.to_vec1::<f32>()?);
+    println!("max_seqlen_in_batch: {}", max_seqlen3);
+    println!("cu_seqlens: {:?}", cu_seqlens3.to_vec1::<f32>()?);
+
+    println!("\n実行完了！");
+    Ok(())
+}
+
+// より効率的なバージョン（エラーハンドリングを含む）
+fn convert_pytorch_logic_optimized(attention_mask: &Tensor) -> Result<(Tensor, i64, Tensor)> {
+    let dims = attention_mask.dims();
+    let last_dim = dims.len() - 1;
+
+    // Step 1: sum along last dimension
+    let seqlens_in_batch = attention_mask.sum_keepdim(last_dim)?.squeeze(last_dim)?; // f32のまま保持
+
+    // Step 2: get max value
+    let max_seqlen_in_batch = seqlens_in_batch.max(0)?.to_scalar::<f32>()? as i64; // f32として取得してi64にキャスト
+
+    // Step 3 & 4: cumsum and pad in one go
+    let cumsum_result = seqlens_in_batch.cumsum(0)?;
+    let cu_seqlens = cumsum_result.pad_with_zeros(0, 1, 0)?;
+
+    Ok((seqlens_in_batch, max_seqlen_in_batch, cu_seqlens))
+}
