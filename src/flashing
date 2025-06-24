@@ -1,0 +1,31 @@
+use candle_core::{Result, Tensor};
+
+pub fn flash_attention_multihead(
+    q: &Tensor,    // [batch, num_heads, seq_len, head_dim]
+    k: &Tensor,    // [batch, num_heads, seq_len, head_dim]
+    v: &Tensor,    // [batch, num_heads, seq_len, head_dim]
+    window_size: usize,
+) -> Result<Tensor> {
+    // 4次元テンソルを3次元に変換
+    let q_flat = reshape_for_flash_attn(q)?;
+    let k_flat = reshape_for_flash_attn(k)?;
+    let v_flat = reshape_for_flash_attn(v)?;
+    
+    // Flash attentionを実行
+    let output = candle_flash_attn::flash_attn_qkv_valen_window(
+        &q_flat, &k_flat, &v_flat, 
+        window_size
+    )?;
+    
+    // 必要に応じて出力を元の形状に戻す
+    let (batch_size, num_heads, seq_len, head_dim) = q.dims4()?;
+    output.reshape(&[batch_size, seq_len, num_heads, head_dim])?
+          .transpose(1, 2) // [batch, num_heads, seq_len, head_dim]
+}
+
+fn reshape_for_flash_attn(tensor: &Tensor) -> Result<Tensor> {
+    let (batch_size, num_heads, seq_len, head_dim) = tensor.dims4()?;
+    tensor.transpose(1, 2)?                              // [batch, seq_len, num_heads, head_dim]
+          .contiguous()?                                 // メモリ連続化
+          .reshape(&[batch_size, seq_len, num_heads * head_dim])
+}
